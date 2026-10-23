@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Thumbnail renderer</title>
+<style>body{background:#111;color:#ccc;font:13px monospace}</style></head>
+<body><canvas id="c" width="320" height="320"></canvas><pre id="log"></pre>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu" crossorigin="anonymous"></script>
+<script src="core.js"></script>
+<script>
+// Renders one thumbnail per model (solidcore's mesh, else SMLib's), shaded with edges,
+// from the viewer's default direction, and POSTs it to thumb_server.py.
+"use strict";
+const SZ = 320, log = s => { document.getElementById("log").textContent += s + "\n"; };
+window.thumbsDone = false;
+(async () => {
+  const only = new URLSearchParams(location.search).get("only");
+  const mj = await (await fetch("manifest.json", { cache: "no-cache" })).json(), man = mj.models, gz = !!mj.gz;
+  const r = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true, alpha: true, preserveDrawingBuffer: true });
+  r.setPixelRatio(1); r.setSize(SZ, SZ, false);
+  const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100); camera.up.set(0, 0, 1);
+  let n = 0;
+  for (const m of man) {
+    if (!m.bytes || (only && !only.split(",").includes(m.id))) continue;
+    const d = await fetchBin(m.id, gz, { cache: "no-cache" });
+    const side = d.hdr.sides.rs ? "rs" : "cpp";
+    const geo = buildSide(d, side), sc = makeScene(), grp = makeObjects(geo, "main");
+    grp.userData.w.visible = false; grp.userData.d.visible = false;
+    sc.add(grp);
+    const { center, radius } = bboxOf(d.hdr);
+    fitCamera(camera, center, radius, DEFAULT_DIR(), 1.0);
+    camera.lookAt(center);
+    placeLights(sc, camera, center, radius);
+    r.render(sc, camera);
+    const blob = await new Promise(res => r.domElement.toBlob(res, "image/webp", 0.82));
+    await fetch("thumb/" + m.id + ".webp", { method: "POST", body: blob });
+    disposeGroup(grp); geo.mesh.dispose(); geo.edges.dispose(); geo.diffPts.dispose();
+    log(`${++n} ${m.id} (${side}) ${blob.size} B`);
+  }
+  log("done " + n);
+  window.thumbsDone = true;
+})().catch(e => { log("error " + e); window.thumbsDone = true; });
+</script></body></html>

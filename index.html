@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>solidcore vs SMLib: upstream test models</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--line:#262a33;--fg:#e4e6eb;--dim:#8b909c;--ok:#3fb27f;--err:#e0a43a;--crash:#e5534b;--to:#b083f0;--acc:#5aa9ff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+a{color:var(--acc);text-decoration:none}
+button,select,input{font:inherit}
+/* gallery */
+#g-head{position:sticky;top:0;z-index:3;background:rgba(15,17,21,.96);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:10px 16px}
+h1{font-size:17px;margin:0;font-weight:600}
+#about{color:var(--dim);font-size:12.5px;margin-top:4px;max-width:1000px}
+#about summary{cursor:pointer;color:var(--fg)}
+#about ul{margin:4px 0;padding-left:20px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center}
+.bar input{flex:1 1 200px;min-width:0;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:15px}
+.bar select{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px;max-width:100%}
+.sum{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:12px;margin-top:8px}
+.sum b{color:var(--fg);font-weight:600}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;padding:12px 16px 40px}
+.card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;color:inherit;display:block}
+.card:hover{border-color:#3a4252}
+.th{aspect-ratio:1;width:100%;display:block;background:radial-gradient(ellipse at 50% 35%,#252a36,#101217);object-fit:contain}
+.nothumb{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px}
+.cap{padding:6px 8px 7px}
+.cn{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all;line-height:1.25}
+.cm{color:var(--dim);font-size:11px;margin-top:2px}
+.badge{position:absolute;top:6px;right:6px;font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:999px;background:rgba(10,12,16,.82);border:1px solid currentColor}
+.k-match{color:var(--ok)}.k-diff{color:var(--crash)}.k-timeout{color:var(--to)}.k-error{color:var(--err)}.k-pending,.k-cpponly{color:var(--dim)}
+.folder{position:absolute;top:6px;left:6px;font-size:10px;color:var(--dim);background:rgba(10,12,16,.75);padding:1px 6px;border-radius:6px}
+/* viewer */
+#viewer{position:fixed;inset:0;z-index:10;background:var(--bg);display:none;flex-direction:column}
+#viewer.on{display:flex}
+#v-head{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:6px;touch-action:pan-y}
+.vt{display:flex;gap:8px;align-items:center;min-width:0}
+.vt h2{font-size:14px;margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.btn{background:var(--panel);color:var(--dim);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:13px;cursor:pointer;white-space:nowrap}
+.btn.on{color:var(--fg);border-color:var(--acc);background:#1b2433}
+.btn:hover{color:var(--fg)}
+#stats{color:var(--dim);font-size:11.5px}
+.tools{display:flex;gap:6px;flex-wrap:wrap}
+#v-body{flex:1;display:flex;min-height:0}
+#views{flex:1;display:flex;min-height:0;min-width:0;gap:1px;background:var(--line)}
+.pane{flex:1;position:relative;min-width:0;min-height:0;background:radial-gradient(ellipse at 50% 30%,#222632,#0d0e12)}
+.pane canvas{display:block;width:100%;height:100%;touch-action:none}
+.lbl{position:absolute;left:10px;top:8px;font-size:12px;font-weight:600;pointer-events:none;text-shadow:0 1px 2px #000}
+.msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;color:var(--dim);font-size:13px;pointer-events:none}
+.legend{position:absolute;right:10px;bottom:8px;font-size:11px;color:var(--dim);pointer-events:none;text-shadow:0 1px 2px #000}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 3px 0 8px;vertical-align:-1px}
+#strip{width:132px;overflow-y:auto;border-left:1px solid var(--line);background:#0c0d11;padding:6px;display:flex;flex-direction:column;gap:6px}
+#strip a{position:relative;display:block;border:2px solid transparent;border-radius:8px;overflow:hidden;flex:none}
+#strip a.cur{border-color:var(--acc)}
+#strip img,#strip .nothumb{width:100%;aspect-ratio:1;display:block;background:radial-gradient(ellipse at 50% 35%,#252a36,#101217)}
+#strip span{position:absolute;left:0;right:0;bottom:0;font-size:9.5px;padding:1px 4px;background:rgba(8,9,12,.78);font-family:ui-monospace,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#strip i{position:absolute;top:3px;right:3px;width:8px;height:8px;border-radius:50%;background:currentColor}
+.ok{color:var(--ok)}.error{color:var(--err)}.crash{color:var(--crash)}.timeout{color:var(--to)}.pending{color:var(--dim)}
+@media (max-width:760px){
+  #v-body{flex-direction:column}
+  #views{flex-direction:column}
+  #strip{width:auto;height:84px;flex-direction:row;overflow-x:auto;overflow-y:hidden;border-left:0;border-top:1px solid var(--line)}
+  #strip a{width:70px;height:70px}
+  #stats{display:none}
+  #stats.open{display:block}
+}
+</style>
+</head>
+<body>
+<header id="g-head">
+  <h1 id="title">solidcore vs SMLib: upstream test models</h1>
+  <details id="about"><summary>About this page</summary>
+<p>Each model is read by two kernels: SMLib, NVIDIA's C++ B-rep kernel (reference
+build), and <a href="https://github.com/tangency-labs/solidcore">solidcore</a>, a Rust port of it. Both run the same
+sampling:</p>
+<ul>
+<li>Each edge curve is evaluated at 48 parameters over its interval.</li>
+<li>Each face gets an 88&times;88 grid over its UV domain. A grid point is kept where the
+face's point classification (UV classification, face tolerance) puts it inside the
+face, and the kept points are evaluated on the surface.</li>
+<li>Each face's trim loops are sampled in UV along their edge uses' UV trim curves (24
+samples per edge use) and evaluated on the surface.</li>
+</ul>
+<p>A model <b>matches</b> when both kernels have the same face and edge counts, the
+same inside/outside mask at every grid point, and every grid, edge and trim-loop
+sample within 1e-5 (outputs are written with 6 decimals).</p>
+<p>Meshes: the grid cells are clipped to the face's trim loops (even-odd, Clipper) and
+triangulated with earcut. Each new boundary vertex is evaluated on the surface by the
+same kernel. Faces whose loops are missing or not closed in UV use the inside-mask
+cells instead. The meshes shown are built on every 2nd grid line (45&times;45 per
+face). The agreement numbers come from the full 88&times;88 run.</p>
+<p>Each model runs per kernel in its own process with a 60&nbsp;s limit, and solidcore
+runs that hit the limit were retried with 300&nbsp;s. Times are wall-clock on one
+shared workstation with other jobs running, measured for this sampling workload
+only.</p>
+<p>Models: NVIDIA SMLib test files (TestFiles/pt_TestFiles), Apache-2.0. SMLib is
+NVIDIA's; solidcore is an independent Rust port. <a href="https://github.com/tangency-labs/solidcore">Source:
+github.com/tangency-labs/solidcore</a>.</p>
+</details>
+  <div class="bar">
+    <input id="q" type="search" placeholder="Search models…" autocomplete="off">
+    <select id="ff"><option value="">All folders</option></select>
+    <select id="fs">
+      <option value="">Any status</option>
+      <option value="match">Match</option>
+      <option value="diff">Differ</option>
+      <option value="timeout">Timeout</option>
+      <option value="error">Error or crash</option>
+      <option value="pending">Pending</option>
+    </select>
+    <select id="so">
+      <option value="name">Sort: folder / name</option>
+      <option value="rs">Sort: solidcore time</option>
+      <option value="cpp">Sort: SMLib time</option>
+      <option value="ratio">Sort: time ratio</option>
+      <option value="faces">Sort: face count</option>
+      <option value="dist">Sort: max point distance</option>
+    </select>
+  </div>
+  <div class="sum" id="sum">Loading…</div>
+</header>
+<main id="grid"></main>
+
+<section id="viewer" aria-label="Model view">
+  <div id="v-head">
+    <div class="vt">
+      <button class="btn" id="back" title="Back to the gallery (Esc)">&larr; Gallery</button>
+      <button class="btn" id="prev" title="Previous model (&larr;)">&lsaquo;</button>
+      <button class="btn" id="next" title="Next model (&rarr;)">&rsaquo;</button>
+      <h2 id="vname"></h2>
+      <button class="btn" id="info">Info</button>
+    </div>
+    <div id="stats"></div>
+    <div class="tools">
+      <button class="btn on" id="t-shade">Shaded</button>
+      <button class="btn on" id="t-edges">Edges</button>
+      <button class="btn" id="t-wire">Wireframe</button>
+      <button class="btn" id="t-diff">Diff</button>
+      <button class="btn" id="t-overlay">Overlay</button>
+      <button class="btn" id="t-reset">Fit</button>
+    </div>
+  </div>
+  <div id="v-body">
+    <div id="views">
+      <div class="pane" id="pa"><canvas id="ca"></canvas><div class="lbl" id="la">SMLib (C++)</div><div class="msg" id="ma"></div><div class="legend" id="lga"></div></div>
+      <div class="pane" id="pb"><canvas id="cb"></canvas><div class="lbl" id="lb">solidcore (Rust)</div><div class="msg" id="mb"></div><div class="legend" id="lgb"></div></div>
+    </div>
+    <nav id="strip" aria-label="Models"></nav>
+  </div>
+</section>
+<script src="app.js"></script>
+</body>
+</html>
