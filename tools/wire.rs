@@ -159,30 +159,35 @@ pub fn loops(args: &[String]) -> Result<(), String> {
         for (li, lu) in eu1::faceuse_loopuses(b, fu, false, None).unwrap_or_default().into_iter().enumerate() {
             if li > 0 { o.push(','); }
             let eus = lul::edgeuses(b, lu, None, None).unwrap_or_default();
-            let (mut uv, mut xyz) = (Vec::new(), Vec::new());
-            let mut ok = !eus.is_empty();
-            'eu: for &eu in &eus {
+            // per edge use a segment {"uv":[..],"xyz":[..]}, or {"miss":why}
+            let _ = write!(o, "{{\"n\":{},\"segs\":[", eus.len());
+            for (ei, &eu) in eus.iter().enumerate() {
+                if ei > 0 { o.push(','); }
                 let c = eu1::uv_trim_curve(b, eu).ok().and_then(|(c, _)| c);
                 let e = eu1::edge(b, eu).ok().flatten();
-                let (Some(c), Some(e)) = (c, e) else { ok = false; break };
-                let Ok(iv) = el::interval(b, e) else { ok = false; break };
+                let Some(e) = e else { o.push_str("{\"miss\":\"noedge\"}"); continue };
+                let Some(c) = c else { o.push_str("{\"miss\":\"nocurve\"}"); continue };
+                let Ok(iv) = el::interval(b, e) else { o.push_str("{\"miss\":\"evalfail\"}"); continue };
                 let rev = eu1::orientation(b, eu).ok() != Some(OrientType::Same);
+                let (mut uv, mut xyz) = (Vec::new(), Vec::new());
+                let mut ok = true;
                 for j in 0..EU_SAMPLES {
                     let jj = if rev { EU_SAMPLES - 1 - j } else { j };
                     let t = iv.min() + (iv.max() - iv.min()) * jj as f64 / (EU_SAMPLES - 1) as f64;
-                    let Ok(q) = c.evaluate_point(&k, t) else { ok = false; break 'eu };
+                    let Ok(q) = c.evaluate_point(&k, t) else { ok = false; break };
                     uv.push(format!("[{},{}]", q.x, q.y));
                     xyz.push(match s.evaluate_point(&k, Point2::new(q.x, q.y)) {
                         Ok(p) => format!("[{:.6},{:.6},{:.6}]", p.x, p.y, p.z),
                         Err(_) => "0".into(),
                     });
                 }
+                if ok {
+                    let _ = write!(o, "{{\"uv\":[{}],\"xyz\":[{}]}}", uv.join(","), xyz.join(","));
+                } else {
+                    o.push_str("{\"miss\":\"evalfail\"}");
+                }
             }
-            if ok {
-                let _ = write!(o, "{{\"n\":{},\"uv\":[{}],\"xyz\":[{}]}}", eus.len(), uv.join(","), xyz.join(","));
-            } else {
-                o.push_str("null");
-            }
+            o.push_str("]}");
         }
         o.push_str("]}");
     }

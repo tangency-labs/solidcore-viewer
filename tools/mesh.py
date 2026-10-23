@@ -14,10 +14,13 @@ Per model and side (needs run.py's raw grid):
     evaluated (loop samples carry their own surface point) is evaluated on the surface
     by the same kernel (`--eval`).
  3. -> <work>/mesh/<id>.<side>.s<STEP>.npz: per face uv, xyz, tri, gridk (run-grid
-    index or -1) and the method used ("clip", or "mask" when loops are missing or open).
-A face whose loops are missing (no UV trim curve) or not closed in UV (e.g. a periodic
-face bounded by seam-crossing loops) is meshed from the kernel's inside mask instead,
-as before.
+    index or -1) and the method used: "clip:<closed|seam|noloops>", or "mask:<why>" when
+    no loop polygon matching the kernel's inside mask could be built.
+An edge use without UV trim curve (e.g. a degenerate pole edge) becomes a straight UV
+segment between its neighbours. A loop that closes only across a periodic seam is
+unwrapped and closed along the seam lines and the domain boundary, picking the closure
+that matches the kernel's inside mask. A face whose loop polygon still differs from the
+kernel's inside mask at more than MASK_TOL of the run grid is meshed from that mask.
 Libraries: numpy (BSD), pyclipper (MIT, Clipper: Boost), mapbox_earcut (ISC).
 """
 import json, os, signal, subprocess, sys, time
@@ -76,40 +79,214 @@ def pip_evenodd(pts, rings):
     return inside
 
 
+MASK_TOL = 0.03  # max fraction of run-grid points where the loop polygon and the kernel's mask disagree
+
+
+def perim(p, lo, hi, tol):
+    """Position of UV point p along the domain boundary (0..4: bottom, right, top, left),
+    or None when it is not on the boundary."""
+    su, sv = hi[0] - lo[0], hi[1] - lo[1]
+    x, y = (p[0] - lo[0]) / su, (p[1] - lo[1]) / sv
+    if abs(y) < tol: return min(max(x, 0), 1)
+    if abs(x - 1) < tol: return 1 + min(max(y, 0), 1)
+    if abs(y - 1) < tol: return 2 + 1 - min(max(x, 0), 1)
+    if abs(x) < tol: return 3 + 1 - min(max(y, 0), 1)
+    return None
+
+
+def perim_point(t, lo, hi):
+    t = t % 4
+    k, f = int(t), t - int(t)
+    u0, v0, u1, v1 = lo[0], lo[1], hi[0], hi[1]
+    return [(u0 + (u1 - u0) * f, v0), (u1, v0 + (v1 - v0) * f), (u1 - (u1 - u0) * f, v1), (u0, v1 - (v1 - v0) * f)][k]
+
+
+def gap_path(a, b, mode, lo, hi, K):
+    """UV points from a to b for edge uses without UV trim curve: a straight segment, or
+    (mode "ccw"/"cw") along the domain boundary when both ends lie on it."""
+    if mode != "straight":
+        ta, tb = perim(a, lo, hi, 1e-6), perim(b, lo, hi, 1e-6)
+        if ta is not None and tb is not None:
+            if mode == "ccw":
+                tb2 = tb if tb >= ta else tb + 4
+                ts = [ta] + [float(c) for c in range(int(np.floor(ta)) + 1, int(np.ceil(tb2)))] + [tb2]
+            else:
+                tb2 = tb if tb <= ta else tb - 4
+                ts = [ta] + [float(c) for c in range(int(np.ceil(ta)) - 1, int(np.floor(tb2)), -1)] + [tb2]
+            return np.array([perim_point(t, lo, hi) for t in ts], float)
+    t = np.linspace(0, 1, K)[:, None]
+    return a + (b - a) * t
+
+
+def loop_polyline(l, lo, hi, mode="straight"):
+    """One loop's UV polyline and surface points from its edge-use segments. A run of
+    edge uses with no UV trim curve (e.g. a degenerate pole edge) is bridged from the
+    previous segment's end to the next one's start by gap_path(mode) (surface points
+    NaN, to be evaluated). None when no segment has samples."""
+    su, sv = hi[0] - lo[0], hi[1] - lo[1]
+    segs = l["segs"]
+    have = [i for i, sg in enumerate(segs) if "uv" in sg]
+    if not have:
+        return None
+    K = max(len(segs[i]["uv"]) for i in have)
+    uvs, xyzs = [], []
+    n = len(segs)
+    for i, sg in enumerate(segs):
+        if "uv" in sg:
+            uvs.append(np.array(sg["uv"], float))
+            xyzs.append(np.array([p if p else [np.nan] * 3 for p in sg["xyz"]], float))
+            continue
+        if "uv" not in segs[(i - 1) % n]:
+            continue  # bridged together with the first edge use of this run
+        prev = segs[(i - 1) % n]
+        nxt = next(segs[(i + k) % n] for k in range(1, n + 1) if "uv" in segs[(i + k) % n])
+        path = gap_path(np.array(prev["uv"][-1], float), np.array(nxt["uv"][0], float), mode, lo, hi, K)
+        uvs.append(path)
+        xyzs.append(np.full((len(path), 3), np.nan))
+    uv, xyz = np.concatenate(uvs), np.concatenate(xyzs)
+    keep = np.ones(len(uv), bool)
+    keep[1:] = np.any(np.abs(np.diff(uv, axis=0)) > 1e-12 * max(su, sv), axis=1)
+    return uv[keep], xyz[keep]
+
+
+def unwrap_open(uv, xyz, lo, period):
+    """A loop that closes only across the periodic seam of coordinate 0 (end = start +-
+    period): wrap it into [lo, lo+period), start it after the seam crossing, add the
+    crossing points on both seam lines, and orient it by increasing coordinate 0."""
+    w = uv.copy()
+    w[:, 0] = lo + np.mod(w[:, 0] - lo, period)
+    if np.allclose(w[0], w[-1], rtol=0, atol=1e-9 * period):
+        w, xyz = w[:-1], xyz[:-1]
+    d = np.diff(np.concatenate([w[:, 0], w[:1, 0]]))
+    jumps = np.nonzero(np.abs(d) > period / 2)[0]
+    if len(jumps) != 1:
+        return None
+    j = int(jumps[0])
+    w, xyz = np.roll(w, -(j + 1), axis=0), np.roll(xyz, -(j + 1), axis=0)
+    first, last = w[0], w[-1]
+    if last[0] > first[0]:  # increasing: crosses the seam at lo + period
+        t = (lo + period - last[0]) / (first[0] + period - last[0])
+        vc = last[1] + t * (first[1] - last[1])
+        w = np.vstack([[lo, vc], w, [lo + period, vc]])
+    else:
+        t = (last[0] - lo) / (last[0] - (first[0] - period))
+        vc = last[1] + t * (first[1] - last[1])
+        w = np.vstack([[lo + period, vc], w, [lo, vc]])
+        w = w[::-1]
+        xyz = xyz[::-1]
+    xyz = np.vstack([np.full((1, 3), np.nan), xyz, np.full((1, 3), np.nan)])
+    return w, xyz
+
+
+def mask_misfit(rings, grid, lo, hi):
+    """Fraction of run-grid points where even-odd inside-the-rings differs from the
+    kernel's inside mask."""
+    if grid is None:
+        return 0.0
+    U = lo[0] + (hi[0] - lo[0]) * np.arange(G) / (G - 1)
+    V = lo[1] + (hi[1] - lo[1]) * np.arange(G) / (G - 1)
+    # interior grid points only: those on the domain boundary often lie exactly on a
+    # loop that runs along it, where inside/outside is a tie
+    pts = np.stack(np.meshgrid(U[1:-1], V[1:-1]), -1).reshape(-1, 2)
+    ins = pip_evenodd(pts, rings)
+    mask = np.array([bool(grid[r * G + c]) for r in range(1, G - 1) for c in range(1, G - 1)])
+    return float(np.count_nonzero(ins != mask)) / len(mask)
+
+
+def build_rings(face, grid, lo, hi):
+    """build_rings_mode for each way of bridging edge uses without UV trim curves; the
+    result that best matches the kernel's inside mask."""
+    missing = any("miss" in sg for l in face["loops"] if l for sg in l["segs"])
+    best = None
+    for mode in (("straight", "ccw", "cw") if missing else ("straight",)):
+        r = build_rings_mode(face, grid, lo, hi, mode)
+        if r[0] is not None and (best is None or r[3] < best[3]):
+            best = r
+        elif best is None and r[0] is None:
+            why = r[2]
+    if best is None:
+        return None, None, why
+    if best[3] > MASK_TOL:
+        return None, None, "maskcheck"
+    return best[:3]
+
+
+def build_rings_mode(face, grid, lo, hi, mode):
+    """-> (rings, ring_xyz, how, misfit) or (None, None, why, 1). Closed loops are used as they are;
+    loops open across a periodic seam are unwrapped and closed along the seam lines and
+    the domain's opposite boundary, choosing the closure that matches the kernel's inside
+    mask; misfit is mask_misfit of the result."""
+    su, sv = hi[0] - lo[0], hi[1] - lo[1]
+    if not face["loops"]:
+        rings = [np.array([lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]], float)]
+        return rings, [np.full((4, 3), np.nan)], "noloops", 0.0
+    closed, open_ = [], {0: [], 1: []}
+    for l in face["loops"]:
+        pl = loop_polyline(l, lo, hi, mode) if l is not None else None
+        if pl is None:
+            return None, None, "nouv", 1.0
+        uv, xyz = pl
+        if len(uv) < 2:
+            continue
+        g = uv[-1] - uv[0]
+        if abs(g[0]) / su < 1e-6 and abs(g[1]) / sv < 1e-6:
+            if np.allclose(uv[0], uv[-1], rtol=0, atol=1e-12 * max(su, sv)):
+                uv, xyz = uv[:-1], xyz[:-1]
+            if len(uv) >= 3:
+                closed.append((uv, xyz))
+            continue
+        for a, (span, other) in enumerate(((su, sv), (sv, su))):
+            if abs(abs(g[a]) - span) / span < 1e-3 and abs(g[1 - a]) / other < 1e-6:
+                open_[a].append((uv, xyz))
+                break
+        else:
+            return None, None, "open", 1.0
+    if open_[0] and open_[1]:
+        return None, None, "open2axes", 1.0
+    how = "closed"
+    cands = [([c[0] for c in closed], [c[1] for c in closed])]
+    for a in (0, 1):
+        ops = open_[a]
+        if not ops:
+            continue
+        how = "seam"
+        sw = (lambda x: x) if a == 0 else (lambda x: x[:, ::-1])
+        lo_a, per, lo_b, hi_b = (lo[0], su, lo[1], hi[1]) if a == 0 else (lo[1], sv, lo[0], hi[0])
+        # candidate closures: each open loop closed straight from its end to its start
+        # (right when the missing piece runs along a pole or domain line), and, once
+        # unwrapped across the seam, closed along the domain boundary or as a band
+        opts = [[(uv, xyz) for uv, xyz in ops]]
+        un = [unwrap_open(sw(uv), xyz, lo_a, per) for uv, xyz in ops]
+        if all(r is not None for r in un):
+            nan2 = np.full((2, 3), np.nan)
+
+            def cap(p, b):  # close an increasing polyline along the boundary line b
+                w = np.vstack([p[0], [[lo_a + per, b], [lo_a, b]]])
+                return sw(w), np.vstack([p[1], nan2])
+            if len(un) == 1:
+                opts += [[cap(un[0], hi_b)], [cap(un[0], lo_b)]]
+            elif len(un) == 2:
+                un.sort(key=lambda p: float(np.mean(p[0][:, 1])))
+                band = (sw(np.vstack([un[0][0], un[1][0][::-1]])), np.vstack([un[0][1], un[1][1][::-1]]))
+                opts += [[band], [cap(un[0], lo_b), cap(un[1], hi_b)]]
+        cands = [(cands[0][0] + [o[0] for o in opt], cands[0][1] + [o[1] for o in opt]) for opt in opts]
+    scored = [(mask_misfit(c[0], grid, lo, hi), c) for c in cands]
+    mf, best = min(scored, key=lambda x: x[0])
+    return best[0], best[1], how + ("" if mode == "straight" else "+" + mode), mf
+
+
 def mesh_face(grid, face, step):
     """-> dict(uv, xyz, tri, gridk, method); xyz rows NaN where an evaluation is needed."""
     ax = axis(step)
     lo, hi = face["dom"] if face else (None, None)
-    rings, ring_xyz = [], []
-    ok = face is not None and all(l is not None for l in face["loops"])
-    if ok:
-        su, sv = hi[0] - lo[0], hi[1] - lo[1]
-        if not (su > 0 and sv > 0):
-            ok = False
-    if ok:
-        for l in face["loops"]:
-            uv = np.array(l["uv"], float)
-            xyz = np.array([p if p else [np.nan] * 3 for p in l["xyz"]], float)
-            # drop consecutive duplicates (edge-use joints)
-            keep = np.ones(len(uv), bool)
-            keep[1:] = np.any(np.abs(np.diff(uv, axis=0)) > 1e-12 * max(su, sv), axis=1)
-            uv, xyz = uv[keep], xyz[keep]
-            gap = np.hypot((uv[0, 0] - uv[-1, 0]) / su, (uv[0, 1] - uv[-1, 1]) / sv)
-            if gap > 1e-6:
-                ok = False
-                break
-            if len(uv) > 1 and np.allclose(uv[0], uv[-1], rtol=0, atol=1e-12 * max(su, sv)):
-                uv, xyz = uv[:-1], xyz[:-1]
-            if len(uv) >= 3:
-                rings.append(uv)
-                ring_xyz.append(xyz)
-        if ok and face["loops"] and not rings:
-            ok = False
-    if not ok:
-        return mask_mesh(grid, step)
-    if not face["loops"]:  # no loops: the whole UV domain
-        rings = [np.array([lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]], float)]
-        ring_xyz = [np.full((4, 3), np.nan)]
+    if face is None:
+        return mask_mesh(grid, step, "noface")
+    su, sv = hi[0] - lo[0], hi[1] - lo[1]
+    if not (su > 0 and sv > 0):
+        return mask_mesh(grid, step, "domain")
+    rings, ring_xyz, why = build_rings(face, grid, lo, hi)
+    if rings is None:
+        return mask_mesh(grid, step, why)
     U = lo[0] + (hi[0] - lo[0]) * np.arange(G) / (G - 1)
     V = lo[1] + (hi[1] - lo[1]) * np.arange(G) / (G - 1)
     us, vs = U[ax], V[ax]
@@ -202,15 +379,15 @@ def mesh_face(grid, face, step):
         flip = area < 0
         tri[flip] = tri[flip][:, [0, 2, 1]]
         tri = tri[area != 0]
-    return {"uv": uv, "xyz": np.array(vxyz, float).reshape(-1, 3), "tri": tri, "gridk": np.array(vgk, np.int64), "method": "clip"}
+    return {"uv": uv, "xyz": np.array(vxyz, float).reshape(-1, 3), "tri": tri, "gridk": np.array(vgk, np.int64), "method": "clip:" + why}
 
 
-def mask_mesh(grid, step):
+def mask_mesh(grid, step, why=""):
     """The earlier mesh: cells of the kernel's inside mask (4 corners -> 2, 3 -> 1)."""
     ax = axis(step)
     n = len(ax)
     if grid is None:
-        return {"uv": np.zeros((0, 2)), "xyz": np.zeros((0, 3)), "tri": np.zeros((0, 3), np.int64), "gridk": np.zeros(0, np.int64), "method": "none"}
+        return {"uv": np.zeros((0, 2)), "xyz": np.zeros((0, 3)), "tri": np.zeros((0, 3), np.int64), "gridk": np.zeros(0, np.int64), "method": "none:" + why}
     vid, xyz, gks = {}, [], []
     for jr in range(n):
         for ic in range(n):
@@ -228,7 +405,7 @@ def mask_mesh(grid, step):
             elif sum(ins) == 3:
                 s = [vid[x] for x in c if x in vid]
                 tris.append(tuple(s))
-    return {"uv": np.zeros((len(xyz), 2)), "xyz": np.array(xyz, float).reshape(-1, 3), "tri": np.array(tris, np.int64).reshape(-1, 3), "gridk": np.array(gks, np.int64), "method": "mask"}
+    return {"uv": np.zeros((len(xyz), 2)), "xyz": np.array(xyz, float).reshape(-1, 3), "tri": np.array(tris, np.int64).reshape(-1, 3), "gridk": np.array(gks, np.int64), "method": "mask:" + why}
 
 
 def process(work, rel, side, step):
@@ -263,11 +440,11 @@ def process(work, rel, side, step):
             meshes.append(mesh_face(g, face, step))
         except Exception as e:  # keep the batch going; fall back to the mask mesh
             print(f"{side} mesh_face {rel} face {fi}: {e!r}", flush=True)
-            meshes.append(mask_mesh(g, step))
+            meshes.append(mask_mesh(g, step, "error"))
     # evaluate the new vertices with the same kernel
     req = os.path.join(work, "mesh", f"{i}.{side}.s{step}.req")
     res = req[:-4] + ".res"
-    need = [(fi, np.nonzero(np.isnan(m["xyz"][:, 0]))[0]) for fi, m in enumerate(meshes) if m["method"] == "clip"]
+    need = [(fi, np.nonzero(np.isnan(m["xyz"][:, 0]))[0]) for fi, m in enumerate(meshes) if m["method"].startswith("clip")]
     need = [(fi, ix) for fi, ix in need if len(ix)]
     if need:
         with open(req, "w") as fh:
@@ -305,7 +482,8 @@ def process(work, rel, side, step):
     tmp = out + ".tmp.npz"
     np.savez_compressed(tmp, **arrs)
     os.replace(tmp, out)
-    print(f"{side} meshed {rel}: {len(meshes)} faces, {methods.count('clip')} clipped, {methods.count('mask')} mask", flush=True)
+    nclip = sum(m.startswith("clip") for m in methods)
+    print(f"{side} meshed {rel}: {len(meshes)} faces, {nclip} clipped, {len(methods) - nclip} other {sorted(set(m for m in methods if not m.startswith('clip')))}", flush=True)
 
 
 def main():

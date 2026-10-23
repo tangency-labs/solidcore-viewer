@@ -236,22 +236,26 @@ static int loops_main(const char* path, const char* outp)
                 o += ",";
             SmTArray<SmEdgeuse*> eus;
             lus[li]->GetEdgeuses(eus);
-            std::string uv, xyz;
-            bool ok = eus.GetSize() > 0;
-            int n = 0;
-            for (ULONG ei = 0; ei < eus.GetSize() && ok; ei++)
+            // per edge use a segment {"uv":[..],"xyz":[..]}, or {"miss":why} when it has
+            // no edge, no UV trim curve, or the curve does not evaluate
+            o += "{\"n\":" + std::to_string(eus.GetSize()) + ",\"segs\":[";
+            for (ULONG ei = 0; ei < eus.GetSize(); ei++)
             {
+                if (ei)
+                    o += ",";
                 SmEdgeuse* eu = eus[ei];
                 SmBSplineCurve* c = eu->GetUVTrimCurve();
                 SmEdge* e = eu->GetEdge();
-                if (c == nullptr || e == nullptr)
+                if (e == nullptr || c == nullptr)
                 {
-                    ok = false;
-                    break;
+                    o += e == nullptr ? "{\"miss\":\"noedge\"}" : "{\"miss\":\"nocurve\"}";
+                    continue;
                 }
                 SmExtent1d iv = e->GetInterval();
                 bool rev = eu->GetOrientation() != SM_OT_SAME;
-                for (int j = 0; j < EU_SAMPLES; j++)
+                std::string uv, xyz;
+                bool ok = true;
+                for (int j = 0; j < EU_SAMPLES && ok; j++)
                 {
                     int jj = rev ? EU_SAMPLES - 1 - j : j;
                     double t = iv.GetMin() + (iv.GetMax() - iv.GetMin()) * (double)jj / (double)(EU_SAMPLES - 1);
@@ -261,12 +265,11 @@ static int loops_main(const char* path, const char* outp)
                         ok = false;
                         break;
                     }
-                    if (n)
+                    if (j)
                     {
                         uv += ",";
                         xyz += ",";
                     }
-                    n++;
                     pt2(uv, q.x, q.y);
                     SmPoint3d p;
                     if (srf->EvaluatePoint(SmPoint2d(q.x, q.y), p) == SM_SUCCESS)
@@ -274,11 +277,12 @@ static int loops_main(const char* path, const char* outp)
                     else
                         xyz += "0";
                 }
+                if (ok)
+                    o += "{\"uv\":[" + uv + "],\"xyz\":[" + xyz + "]}";
+                else
+                    o += "{\"miss\":\"evalfail\"}";
             }
-            if (!ok)
-                o += "null";
-            else
-                o += "{\"n\":" + std::to_string(eus.GetSize()) + ",\"uv\":[" + uv + "],\"xyz\":[" + xyz + "]}";
+            o += "]}";
         }
         o += "]}";
     }

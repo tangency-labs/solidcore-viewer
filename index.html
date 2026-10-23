@@ -89,8 +89,10 @@ same inside/outside mask at every grid point, and every grid, edge and trim-loop
 sample within 1e-5 (outputs are written with 6 decimals).</p>
 <p>Meshes: the grid cells are clipped to the face's trim loops (even-odd, Clipper) and
 triangulated with earcut. Each new boundary vertex is evaluated on the surface by the
-same kernel. Faces whose loops are missing or not closed in UV use the inside-mask
-cells instead. The meshes shown are built on every 2nd grid line (45&times;45 per
+same kernel. Loops that close only across a periodic seam are unwrapped. Edge uses
+with no UV trim curve, such as degenerate pole edges, are bridged in UV. A face whose
+loop polygon still disagrees with the kernel's inside mask, or that has no UV trim
+curves, uses the inside-mask cells instead. The meshes shown are built on every 2nd grid line (45&times;45 per
 face). The agreement numbers come from the full 88&times;88 run.</p>
 <p>Each model runs per kernel in its own process with a 60&nbsp;s limit, and solidcore
 runs that hit the limit were retried with 300&nbsp;s. Times are wall-clock on one

@@ -23,8 +23,11 @@ inside/outside mask at every grid point, and every grid, edge and trim-loop samp
 
 **Meshes.** Grid cells are clipped to each face's trim loops (even-odd, with Clipper
 via pyclipper) and triangulated with earcut. Each new boundary vertex is evaluated on
-the surface by the same kernel. Faces whose loops are missing or not closed in UV use
-the inside-mask cells instead. The published meshes use every 2nd grid line (45×45 per
+the surface by the same kernel. Loops that close only across a periodic seam are
+unwrapped. Edge uses with no UV trim curve, such as degenerate pole edges, are bridged
+in UV. A face whose loop polygon still disagrees with the kernel's inside mask, or that
+has no UV trim curves at all, uses the inside-mask cells instead (154 of 2,631 faces per
+kernel, 138 of them with no UV trim curves in the file). The published meshes use every 2nd grid line (45×45 per
 face), quantized to 16 bits and gzipped. All agreement numbers come from the full 88×88
 run.
 

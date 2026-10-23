@@ -104,7 +104,10 @@ def build(work, site, rel):
                 m = meshmod.mask_mesh(g, STEP)
                 fm.append((m["xyz"], m["tri"], m["gridk"], m["method"]))
         meshes[s] = fm
-        entry[s]["mesh"] = {m: sum(1 for f in fm if f[3] == m) for m in ("clip", "mask")}
+        entry[s]["mesh"] = {m: sum(1 for f in fm if f[3].split(":")[0] == m) for m in ("clip", "mask")}
+        why = sorted({f[3] for f in fm if not f[3].startswith("clip")})
+        if why:
+            entry[s]["mesh"]["fallback"] = why
     allp = [np.asarray(p, float).reshape(-1, 3) for s in meshes for f in meshes[s] for p in [f[0][f[1].reshape(-1)] if len(f[1]) else np.zeros((0, 3))]]
     allp += [np.array(e, float).reshape(-1, 3) for d in data.values() if d for e in d["edges"]]
     allp += [np.array([p for p in g if p], float).reshape(-1, 3) for d in data.values() if d for g in d["grids"] if g]
@@ -191,12 +194,16 @@ def build(work, site, rel):
                         continue
                     if not xa:
                         continue
-                    for p, r in zip(xa["xyz"], xb["xyz"]):
-                        n += 1
-                        if p and r:
-                            bmax = max(bmax, dist(p, r))
-                        elif p or r:
-                            bmiss += 1
+                    for sa, sb in zip(xa["segs"], xb["segs"]):
+                        if ("uv" in sa) != ("uv" in sb) or sa.get("miss") != sb.get("miss"):
+                            same = False
+                            continue
+                        for p, r in zip(sa.get("xyz", []), sb.get("xyz", [])):
+                            n += 1
+                            if p and r:
+                                bmax = max(bmax, dist(p, r))
+                            elif p or r:
+                                bmiss += 1
             c.update(bnd_same_structure=same, bnd_max_dist=bmax, bnd_missing=bmiss, bnd_samples=n)
         c["agree"] = (c["same_counts"] and mism == 0 and maxd <= DIST_TOL and emax <= DIST_TOL
                       and c.get("bnd_same_structure", True) and c.get("bnd_max_dist", 0) <= DIST_TOL and c.get("bnd_missing", 0) == 0)
